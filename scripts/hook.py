@@ -3,14 +3,18 @@ import hashlib
 import numpy as np
 import torch.nn as nn
 from functools import partial
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 from scripts.logging import logger
-from scripts.enums import ControlModelType, AutoMachine, HiResFixOption
-from scripts.controlmodel_ipadapter import ImageEmbed
+from scripts.enums import (
+    ControlModelType,
+    AutoMachine,
+    HiResFixOption,
+    ControlNetUnionControlType,
+)
+from scripts.ipadapter.ipadapter_model import ImageEmbed
+from scripts.controlnet_sparsectrl import SparseCtrl
 from modules import devices, lowvram, shared, scripts
-
-cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
 
 from ldm.modules.diffusionmodules.util import timestep_embedding, make_beta_schedule
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
@@ -23,10 +27,11 @@ from modules.processing import StableDiffusionProcessing
 
 try:
     from sgm.modules.attention import BasicTransformerBlock as BasicTransformerBlockSGM
-except:
+except ImportError:
     print('Warning: ControlNet failed to load SGM - will use LDM instead.')
     BasicTransformerBlockSGM = BasicTransformerBlock
 
+cond_cast_unet = getattr(devices, 'cond_cast_unet', lambda x: x)
 
 POSITIVE_MARK_TOKEN = 1024
 NEGATIVE_MARK_TOKEN = - POSITIVE_MARK_TOKEN
@@ -172,6 +177,8 @@ class ControlParams:
             cfg_injection,
             hr_option: HiResFixOption = HiResFixOption.BOTH,
             control_context_override: Optional[Any] = None,
+            effective_region_mask: Optional[torch.Tensor] = None,
+            union_control_types: List[ControlNetUnionControlType] = None,
             **kwargs  # To avoid errors
     ):
         self.control_model = control_model
@@ -187,6 +194,8 @@ class ControlParams:
         self.hr_hint_cond = hr_hint_cond
         self.hr_option = hr_option
         self.control_context_override = control_context_override
+        self.effective_region_mask = effective_region_mask
+        self.union_control_types = union_control_types or []
         self.used_hint_cond = None
         self.used_hint_cond_latent = None
         self.used_hint_inpaint_hijack = None
@@ -219,6 +228,18 @@ class ControlParams:
         else:
             assert False, "NOTREACHED"
         return control_disabled
+
+    def apply_effective_region_mask(self, out: torch.Tensor) -> torch.Tensor:
+        if self.effective_region_mask is None:
+            return out
+
+        B, C, H, W = out.shape
+        mask = torch.nn.functional.interpolate(
+            self.effective_region_mask.to(out.device),
+            size=(H, W),
+            mode="bilinear",
+        )
+        return out * mask
 
 
 def aligned_adding(base, x, require_channel_alignment):
@@ -385,17 +406,25 @@ class UnetHook(nn.Module):
             vae_output = vae_cache.get(x)
             if vae_output is None:
                 with devices.autocast():
-                    vae_output = p.sd_model.encode_first_stage(x)
-                    vae_output = p.sd_model.get_first_stage_encoding(vae_output)
+                    vae_output = torch.stack([
+                        p.sd_model.get_first_stage_encoding(
+                            p.sd_model.encode_first_stage(torch.unsqueeze(img, 0).to(device=devices.device))
+                        )[0].to(img.device)
+                        for img in x
+                    ])
                     if torch.all(torch.isnan(vae_output)).item():
-                        logger.info(f'ControlNet find Nans in the VAE encoding. \n '
-                                    f'Now ControlNet will automatically retry.\n '
-                                    f'To always start with 32-bit VAE, use --no-half-vae commandline flag.')
+                        logger.info('ControlNet find Nans in the VAE encoding. \n '
+                                    'Now ControlNet will automatically retry.\n '
+                                    'To always start with 32-bit VAE, use --no-half-vae commandline flag.')
                         devices.dtype_vae = torch.float32
                         x = x.to(devices.dtype_vae)
                         p.sd_model.first_stage_model.to(devices.dtype_vae)
-                        vae_output = p.sd_model.encode_first_stage(x)
-                        vae_output = p.sd_model.get_first_stage_encoding(vae_output)
+                        vae_output = torch.stack([
+                            p.sd_model.get_first_stage_encoding(
+                                p.sd_model.encode_first_stage(torch.unsqueeze(img, 0).to(device=devices.device))
+                            )[0].to(img.device)
+                            for img in x
+                        ])
                 vae_cache.set(x, vae_output)
                 logger.info(f'ControlNet used {str(devices.dtype_vae)} VAE to encode {vae_output.shape}.')
             latent = vae_output
@@ -408,13 +437,16 @@ class UnetHook(nn.Module):
             raise ValueError('ControlNet failed to use VAE. Please try to add `--no-half-vae`, `--no-half` and remove `--precision full` in launch cmd.')
 
     def guidance_schedule_handler(self, x):
+        if not self.control_params:
+            return
+
         for param in self.control_params:
             current_sampling_percent = (x.sampling_step / x.total_sampling_steps)
             param.guidance_stopped = current_sampling_percent < param.start_guidance_percent or current_sampling_percent > param.stop_guidance_percent
             if self.model is not None:
                 self.model.current_sampling_percent = current_sampling_percent
 
-    def hook(self, model, sd_ldm, control_params, process, batch_option_uint_separate=False, batch_option_style_align=False):
+    def hook(self, model, sd_ldm, control_params: List[ControlParams], process, batch_option_uint_separate=False, batch_option_style_align=False):
         self.model = model
         self.sd_ldm = sd_ldm
         self.control_params = control_params
@@ -547,7 +579,7 @@ class UnetHook(nn.Module):
                     continue
 
                 if not (
-                    param.control_model_type.is_controlnet() or
+                    param.control_model_type.is_controlnet or
                     param.control_model_type == ControlModelType.T2I_Adapter
                 ):
                     continue
@@ -556,13 +588,13 @@ class UnetHook(nn.Module):
                 x_in = x
                 control_model = param.control_model.control_model
 
-                if param.control_model_type.is_controlnet():
+                if param.control_model_type.is_controlnet:
                     if x.shape[1] != control_model.input_blocks[0][0].in_channels and x.shape[1] == 9:
                         # inpaint_model: 4 data + 4 downscaled image + 1 mask
                         x_in = x[:, :4, ...]
                         require_inpaint_hijack = True
 
-                assert param.used_hint_cond is not None, f"Controlnet is enabled but no input image is given"
+                assert param.used_hint_cond is not None, "Controlnet is enabled but no input image is given"
 
                 hint = param.used_hint_cond
                 if param.control_model_type == ControlModelType.InstantID:
@@ -572,7 +604,7 @@ class UnetHook(nn.Module):
                     controlnet_context = context
 
                 # ControlNet inpaint protocol
-                if hint.shape[1] == 4:
+                if hint.shape[1] == 4 and not isinstance(control_model, SparseCtrl):
                     c = hint[:, 0:3, :, :]
                     m = hint[:, 3:4, :, :]
                     m = (m > 0.5).float()
@@ -583,7 +615,16 @@ class UnetHook(nn.Module):
                     hint=hint,
                     timesteps=timesteps,
                     context=controlnet_context,
-                    y=y
+                    y=y,
+                    control_type=(
+                        [
+                            t.int_value()
+                            for t in param.union_control_types
+                            if t != ControlNetUnionControlType.UNKNOWN
+                        ]
+                        if param.control_model_type == ControlModelType.ControlNetUnion
+                        else None
+                    ),
                 )
 
                 if is_sdxl:
@@ -604,17 +645,14 @@ class UnetHook(nn.Module):
                     if 'mlsd' in param.preprocessor['name']:
                         high_res_fix_forced_soft_injection = True
 
-                # if high_res_fix_forced_soft_injection:
-                #     logger.info('[ControlNet] Forced soft_injection in high_res_fix in enabled.')
-
                 if param.soft_injection or high_res_fix_forced_soft_injection:
                     # important! use the soft weights with high-res fix can significantly reduce artifacts.
                     if param.control_model_type == ControlModelType.T2I_Adapter:
                         control_scales = [param.weight * x for x in (0.25, 0.62, 0.825, 1.0)]
-                    elif param.control_model_type.is_controlnet():
+                    elif param.control_model_type.is_controlnet:
                         control_scales = [param.weight * (0.825 ** float(12 - i)) for i in range(13)]
 
-                if is_sdxl and param.control_model_type.is_controlnet():
+                if is_sdxl and param.control_model_type.is_controlnet:
                     control_scales = control_scales[:10]
 
                 if param.advanced_weighting is not None:
@@ -623,13 +661,17 @@ class UnetHook(nn.Module):
                         logger.warn("Advanced weighting overwrites soft_injection effect.")
                     control_scales = param.advanced_weighting
 
-                control = [c * scale for c, scale in zip(control, control_scales)]
+                control = [
+                    param.apply_effective_region_mask(c * scale)
+                    for c, scale
+                    in zip(control, control_scales)
+                ]
                 if param.global_average_pooling:
                     control = [torch.mean(c, dim=(2, 3), keepdim=True) for c in control]
 
                 for idx, item in enumerate(control):
                     target = None
-                    if param.control_model_type.is_controlnet():
+                    if param.control_model_type.is_controlnet:
                         target = total_controlnet_embedding
                     if param.control_model_type == ControlModelType.T2I_Adapter:
                         target = total_t2i_adapter_embedding
@@ -676,8 +718,9 @@ class UnetHook(nn.Module):
                 try:
                     # Trigger the register_forward_pre_hook
                     outer.sd_ldm.model()
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("register_forward_pre_hook")
+                    logger.debug(e)
 
             # Clear attention and AdaIn cache
             for module in outer.attn_module_list:

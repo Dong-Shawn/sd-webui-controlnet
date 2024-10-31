@@ -1,10 +1,24 @@
 # ControlNet for Stable Diffusion WebUI
 
 The WebUI extension for ControlNet and other injection-based SD controls.
-
-![image](https://github.com/Mikubill/sd-webui-controlnet/assets/20929282/51172d20-606b-4b9f-aba5-db2f2417cb0b)
+![image](https://github.com/Mikubill/sd-webui-controlnet/assets/20929282/261f9a50-ba9c-472f-b398-fced61929c4a)
 
 This extension is for AUTOMATIC1111's [Stable Diffusion web UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui), allows the Web UI to add [ControlNet](https://github.com/lllyasviel/ControlNet) to the original Stable Diffusion model to generate images. The addition is on-the-fly, the merging is not required.
+
+# News
+
+- [2024-07-09] 🔥[v1.1.454] ControlNet union model support [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2989]
+- [2024-07-01] 🔥[v1.1.452] Depth Anything V2 - UDAV2 depth Preprocessor [Pull thread: https://github.com/Mikubill/sd-webui-controlnet/pull/2969]
+- [2024-05-19] 🔥[v1.1.449] Anyline Preprocessor & MistoLine SDXL model [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2907]
+- [2024-05-04] 🔥[v1.1.447] PuLID [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2841]
+- [2024-04-30] 🔥[v1.1.446] Effective region mask supported for ControlNet/IPAdapter [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2831]
+- [2024-04-27] 🔥ControlNet-lllite Normal Dsine released [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2813]
+- [2024-04-19] 🔥[v1.1.445] IPAdapter advanced weight [Instant Style] [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2770]
+- [2024-04-17] 🔥[v1.1.444] Marigold depth preprocessor [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2760]
+- [2024-04-15] 🔥ControlNet++ models released [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2778]
+- [2024-04-13] 🔥TTPLanet_SDXL_Controlnet_Tile_Realistic v2 released [[Civitai Page](https://civitai.com/models/330313/ttplanetsdxlcontrolnettilerealistic)]
+- [2024-03-31] 🔥[v1.1.443] IP-Adapter CLIP mask and ip-adapter-auto preprocessor [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2723]
+- [2024-03-20] 🔥IPAdapter Composition [Discussion thread: https://github.com/Mikubill/sd-webui-controlnet/discussions/2781]
 
 # Installation
 
@@ -19,20 +33,7 @@ This extension is for AUTOMATIC1111's [Stable Diffusion web UI](https://github.c
 9. After you put models in the correct folder, you may need to refresh to see the models. The refresh button is right to your "Model" dropdown.
 
 # Download Models
-
-Right now all the 14 models of ControlNet 1.1 are in the beta test.
-
-Download the models from ControlNet 1.1: https://huggingface.co/lllyasviel/ControlNet-v1-1/tree/main
-
-You need to download model files ending with ".pth" .
-
-Put models in your "stable-diffusion-webui\extensions\sd-webui-controlnet\models". You only need to download "pth" files.
-
-Do not right-click the filenames in HuggingFace website to download. Some users right-clicked those HuggingFace HTML websites and saved those HTML pages as PTH/YAML files. They are not downloading correct files. Instead, please click the small download arrow “↓” icon in HuggingFace to download.
-
-# Download Models for SDXL
-
-See instructions [here](https://github.com/Mikubill/sd-webui-controlnet/discussions/2039).
+You can find all download links here: https://github.com/Mikubill/sd-webui-controlnet/wiki/Model-download.
 
 # Features in ControlNet 1.1
 
